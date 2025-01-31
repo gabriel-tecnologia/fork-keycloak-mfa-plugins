@@ -13,7 +13,8 @@
 		<module>sms-authenticator</module>
         <module>app-authenticator</module>
 		<module>enforce-mfa</module>
-	</modules>
+        <module>sms-authenticator-rest</module>
+    </modules>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
