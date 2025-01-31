@@ -7,6 +7,8 @@ import jakarta.ws.rs.ext.Provider;
 import netzbegruenung.keycloak.authenticator.gateway.SmsServiceFactory;
 
 import org.keycloak.common.util.SecretGenerator;
+import org.keycloak.email.EmailException;
+import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.models.*;
 import org.keycloak.protocol.oidc.TokenManager;
@@ -18,17 +20,18 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.AuthenticationSessionProvider;
 import org.keycloak.utils.MediaType;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @Provider
-@Path("/realms/{realm}/sms-auth")
+@Path("/realms/{realm}/auth/{deliveryOption}")
 public class SmsAuthResourceProvider implements RealmResourceProvider {
 	private static final Logger logger = Logger.getLogger(SmsAuthResourceProvider.class.getName());
 
 	private static final int VERIFICATION_CODE_LENGTH = 6;
 	private static final int VERIFICATION_CODE_TTL = 300; // 5 minutes
+	private static final ArrayList<String> VALID_DELIVERY_OPTIONS= new ArrayList<>(List.of("sms", "email"));
 
 	private final KeycloakSession session;
 
@@ -57,27 +60,62 @@ public class SmsAuthResourceProvider implements RealmResourceProvider {
 	@Produces(MediaType.APPLICATION_JSON)
 	public Response initAuth(
 		@PathParam("realm") String realmName,
+		@PathParam("deliveryOption") String deliveryOption,
 		@FormParam("phoneNumber") String phoneNumber,
-		@FormParam("client_id") String clientId) {
-
-		logger.info("Starting SMS authentication init for phone: " + phoneNumber);
+		@FormParam("email") String email,
+		@FormParam("client_id") String clientId){
 
 		try {
+
+			if(!VALID_DELIVERY_OPTIONS.contains(deliveryOption)){
+				logger.severe("Invalid deliveryOption: " + deliveryOption);
+				throw new WebApplicationException("The delivery option: " + deliveryOption + "isn't supported.", Response.Status.BAD_REQUEST);
+			}
+
 			// Validate and find required entities
 			RealmModel realm = findRealm(realmName);
 			ClientModel client = findClient(realm, clientId);
-			UserModel user = findUserByPhone(realm, phoneNumber);
+			UserModel user;
+
+			if(phoneNumber != null && !phoneNumber.isEmpty()){
+				user = findUserByPhone(realm, phoneNumber);
+			} else {
+				user = session.users().getUserByEmail(realm, email);
+			}
 
 			// Create authentication session
 			AuthenticationSessionModel authSession = createAuthSession(realm, client, user);
 
-			// Send SMS
-			sendVerificationSms(phoneNumber, authSession.getAuthNote("code"));
+			switch (deliveryOption) {
+				case "email": {
+					Map<String, Object> mailBodyAttributes = new HashMap<>();
+					mailBodyAttributes.put("username", user.getUsername());
+					mailBodyAttributes.put("code", authSession.getAuthNote("code"));
+					mailBodyAttributes.put("ttl", VERIFICATION_CODE_TTL);
+					List<Object> subjectParams = List.of(realmName);
+					try {
+						EmailTemplateProvider emailProvider = (EmailTemplateProvider) session.getProvider(EmailTemplateProvider.class);
+						emailProvider.setRealm(realm);
+						emailProvider.setUser(user);
+						emailProvider.send("emailCodeSubject", subjectParams, "code-email.ftl", mailBodyAttributes);
+					} catch (EmailException emailException) {
+						logger.severe("Failed to send email: " + emailException.getMessage());
+					}
+					break;
+				}
+				case "sms": {
+					sendVerificationSms(phoneNumber, authSession.getAuthNote("code"));
+					break;
+				}
+				default: {
+					throw new WebApplicationException("Invalid deliveryOption: " + deliveryOption, Response.Status.BAD_REQUEST);
+				}
+			}
 
 			// Prepare response
 			return Response.ok()
 				.entity(Map.of(
-					"message", "SMS sent successfully",
+					"message", deliveryOption + " sent successfully",
 					"expires_in", VERIFICATION_CODE_TTL,
 					"session_id", authSession.getParentSession().getId()
 				))
